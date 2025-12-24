@@ -7,40 +7,37 @@ class SimpleMediaDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_path_len = max_path_len
         self.max_name_len = max_name_len
-        # 加载数据：只取第一个#后的内容作为名称
-        self.data = self._load_data(data_file)
+        self.data = self._load_and_validate_data(data_file)
 
-    def _load_data(self, data_file):
-        data = []
-        with open(data_file, "r", encoding="utf-8") as f:
+    def _load_and_validate_data(self, data_file):
+        """加载并校验数据，过滤无效样本"""
+        valid_data = []
+        with open(data_file, "r", encoding="utf-8", errors="ignore") as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
-                    continue  # 跳过空行
-                # 仅按第一个#拆分，忽略后续所有#
-                if "#" not in line:
-                    print(f"警告：第{line_num}行无#分隔符，跳过该行：{line}")
                     continue
-                # split("#", 1)：只拆分第一个#，返回[路径, 名称+后续内容]
-                path_part, name_part = line.split("#", 1)
-                # 名称仅取第一个#后的内容（自动忽略后续#及内容）
-                media_name = name_part.strip()
-                # 过滤空名称
-                if not media_name:
-                    print(f"警告：第{line_num}行名称为空，跳过该行：{line}")
+                # 拆分路径和名称（至少包含一个#）
+                parts = line.split("#", 2)
+                if len(parts) < 2:
+                    print(f"警告：第{line_num}行格式错误，缺少#分隔符，已跳过")
                     continue
-                data.append({"path": path_part.strip(), "name": media_name})
-        return data
+                path = parts[0].strip()
+                name = parts[1].strip()
+                if not path or not name:
+                    print(f"警告：第{line_num}行路径/名称为空，已跳过")
+                    continue
+                valid_data.append((path, name))
+        print(f"数据加载完成：共{len(valid_data)}条有效样本")
+        return valid_data
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        item = self.data[idx]
-        path = item["path"]
-        name = item["name"]
-
-        # 编码路径（删除use_fast=False）
+        path, name = self.data[idx]
+        
+        # 编码路径
         path_encoding = self.tokenizer(
             path,
             max_length=self.max_path_len,
@@ -48,7 +45,7 @@ class SimpleMediaDataset(Dataset):
             truncation=True,
             return_tensors="pt"
         )
-        # 编码名称（删除use_fast=False）
+        # 编码名称
         name_encoding = self.tokenizer(
             name,
             max_length=self.max_name_len,
@@ -57,9 +54,10 @@ class SimpleMediaDataset(Dataset):
             return_tensors="pt"
         )
 
+        # 挤压维度（去掉batch维度）
         return {
-            "path_ids": path_encoding["input_ids"].squeeze(),
-            "path_mask": path_encoding["attention_mask"].squeeze(),
-            "name_ids": name_encoding["input_ids"].squeeze(),
-            "name_mask": name_encoding["attention_mask"].squeeze()
+            "path_ids": path_encoding["input_ids"].squeeze(0),
+            "path_mask": path_encoding["attention_mask"].squeeze(0),
+            "name_ids": name_encoding["input_ids"].squeeze(0),
+            "name_mask": name_encoding["attention_mask"].squeeze(0)
         }

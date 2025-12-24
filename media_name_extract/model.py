@@ -6,114 +6,80 @@ from transformers import BertModel, BertTokenizer
 class MediaNameExtractor(nn.Module):
     def __init__(self, pretrained_model_name="bert-base-chinese"):
         super().__init__()
+        # 加载BERT预训练模型
         self.bert = BertModel.from_pretrained(
             pretrained_model_name,
-            dtype=torch.float32,
+            torch_dtype=torch.float32,
             low_cpu_mem_usage=True
         )
-        # 删除use_fast=False参数
         self.tokenizer = BertTokenizer.from_pretrained(pretrained_model_name)
-        # 名称提取头：生成候选名称的相似度分数
+        # dropout层缓解过拟合
+        self.dropout = nn.Dropout(0.3)
+        # 线性层：将768维向量映射到1维分数
         self.fc = nn.Linear(self.bert.config.hidden_size, 1)
-        self.dropout = nn.Dropout(0.1)
 
     def forward(self, path_ids, path_mask, name_ids=None, name_mask=None):
         """
-        path_ids/path_mask：文件路径的编码
-        name_ids/name_mask：目标名称的编码（训练时传入，推理时无）
+        统一训练/推理逻辑：
+        - 训练：输入路径+名称，计算相似度损失
+        - 推理：仅输入路径，输出0~1的名称概率分数
         """
-        # 1. 编码路径文本
-        path_emb = self.bert(input_ids=path_ids, attention_mask=path_mask).last_hidden_state  # [batch, path_len, 768]
+        # 1. BERT编码路径文本（核心语义提取）
+        path_bert_out = self.bert(input_ids=path_ids, attention_mask=path_mask)
+        path_emb = path_bert_out.last_hidden_state  # [batch, seq_len, 768]
         path_emb = self.dropout(path_emb)
 
         if name_ids is not None:
-            # 训练阶段：计算路径中每个token与目标名称的匹配损失
-            name_emb = self.bert(input_ids=name_ids, attention_mask=name_mask).last_hidden_state  # [batch, name_len, 768]
+            # ========== 训练阶段逻辑 ==========
+            # 编码名称文本
+            name_bert_out = self.bert(input_ids=name_ids, attention_mask=name_mask)
+            name_emb = name_bert_out.last_hidden_state  # [batch, name_len, 768]
             name_emb = self.dropout(name_emb)
+
+            # 余弦相似度计算（归一化到0~1）
+            path_emb_norm = F.normalize(path_emb, dim=-1)  # [batch, path_len, 768]
+            name_emb_norm = F.normalize(name_emb, dim=-1)  # [batch, name_len, 768]
             
-            # 计算路径token与名称token的余弦相似度
-            path_emb_norm = F.normalize(path_emb, dim=-1)
-            name_emb_norm = F.normalize(name_emb, dim=-1)
-            similarity = torch.matmul(path_emb_norm, name_emb_norm.transpose(1, 2))  # [batch, path_len, name_len]
-            max_similarity = torch.max(similarity, dim=-1)[0]  # [batch, path_len]：每个路径token与名称的最大相似度
+            # 计算路径字符与名称字符的相似度矩阵 [batch, path_len, name_len]
+            similarity_matrix = torch.matmul(path_emb_norm, name_emb_norm.transpose(1, 2))
+            # 每个路径字符取与名称字符的最大相似度 [batch, path_len]
+            max_similarity = torch.max(similarity_matrix, dim=-1)[0]
+
+            # 生成标签：名称字符在路径中的位置为1，其他为0
+            batch_size, path_len = max_similarity.shape
+            label = torch.zeros_like(max_similarity, device=max_similarity.device)
             
-            # 损失：让名称对应的token相似度趋近1，其余趋近0
-            loss = self._compute_matching_loss(path_ids, name_ids, max_similarity)
+            for b in range(batch_size):
+                # 提取名称的有效字符（排除padding和特殊符号）
+                name_len = torch.sum(name_mask[b]).item()
+                name_ids_valid = name_ids[b][:name_len]
+                name_tokens = self.tokenizer.convert_ids_to_tokens(name_ids_valid)
+                name_tokens = [t for t in name_tokens if t not in ["[CLS]", "[SEP]", "[PAD]"]]
+                
+                # 提取路径的有效字符
+                path_ids_valid = path_ids[b]
+                path_tokens = self.tokenizer.convert_ids_to_tokens(path_ids_valid)
+                
+                # 标注：路径中出现的名称字符设为1
+                for i, path_token in enumerate(path_tokens):
+                    if path_token in name_tokens and path_token not in ["[CLS]", "[SEP]", "[PAD]"]:
+                        label[b][i] = 1.0
+
+            # 计算MSE损失（目标是让相似度分数接近标签1/0）
+            loss = F.mse_loss(max_similarity, label)
             return {"loss": loss, "similarity": max_similarity}
         else:
-            # 推理阶段：输出路径中每个token的重要性分数
-            token_scores = self.fc(path_emb).squeeze(-1)  # [batch, path_len]
+            # ========== 推理阶段逻辑 ==========
+            # 归一化路径向量 + 线性层映射 + Sigmoid归一化到0~1
+            path_emb_norm = F.normalize(path_emb, dim=-1)
+            token_scores = self.fc(path_emb_norm).squeeze(-1)  # [batch, path_len]
+            token_scores = torch.sigmoid(token_scores)  # 关键：映射到0~1区间
             return {"token_scores": token_scores}
 
-    def _compute_matching_loss(self, path_ids, name_ids, max_similarity):
-        """计算匹配损失：名称在路径中的token分数→1，其余→0"""
-        batch_size = path_ids.shape[0]
-        loss = 0.0
-
-        for b in range(batch_size):
-            # 把路径和名称转成字符串（去特殊token）
-            path_str = self.tokenizer.decode(path_ids[b], skip_special_tokens=True)
-            name_str = self.tokenizer.decode(name_ids[b], skip_special_tokens=True)
-            
-            # 找到名称在路径中的起始/结束索引
-            if name_str in path_str:
-                start_idx = path_str.index(name_str)
-                end_idx = start_idx + len(name_str)
-            else:
-                # 名称不在路径中时，用模糊匹配（取最相似的片段）
-                start_idx, end_idx = 0, len(name_str)
-
-            # 生成监督标签：名称区间内=1，其余=0
-            path_len = path_ids[b].shape[0]
-            label = torch.zeros(path_len).to(path_ids.device)
-            # 映射字符索引到token索引（中文按字符拆分，一一对应）
-            for i in range(path_len):
-                token = self.tokenizer.decode([path_ids[b][i]])
-                if start_idx <= i < end_idx and token.strip() != "":
-                    label[i] = 1.0
-
-            # 计算MSE损失（相似度分数趋近标签值）
-            loss += F.mse_loss(max_similarity[b], label)
-
-        return loss / batch_size
-
-    @torch.no_grad()
-    def extract_name_1(self, path):
-        """推理：从路径提取名称"""
-        # 编码路径（删除use_fast=False）
-        encoding = self.tokenizer(
-            path,
-            max_length=128,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt"
-        )
-        path_ids = encoding["input_ids"].to(next(self.parameters()).device)
-        path_mask = encoding["attention_mask"].to(next(self.parameters()).device)
-
-        # 预测每个token的重要性分数
-        outputs = self.forward(path_ids, path_mask)
-        scores = outputs["token_scores"].squeeze().cpu().numpy()
-
-        # 提取高分token（分数>0.5的视为名称字符）
-        tokens = self.tokenizer.convert_ids_to_tokens(path_ids.squeeze().cpu().numpy())
-        name_chars = []
-        for token, score in zip(tokens, scores):
-            if score > 0.5 and token not in ["[PAD]", "[CLS]", "[SEP]"]:
-                # 过滤冗余符号/关键词
-                if token not in ["/", "\\", ".", "（", "）", "(", ")", " ", "4K", "1080P", "HDR", "国语", "中字", "超清", "蓝光", "原盘", "系列", "部", "集"]:
-                    name_chars.append(token)
-
-        # 去重+拼接+清理
-        name = "".join(list(dict.fromkeys(name_chars))).strip()
-        # 过滤纯数字/空字符串
-        if not name or name.isdigit():
-            return "未识别到影视名称"
-        return name
-
-    # 在 model.py 的 extract_name 函数中，添加打印逻辑（临时调试）
     @torch.no_grad()
     def extract_name(self, path):
+        """推理：从路径提取影视名称"""
+        # 1. 文本编码（适配BERT输入格式）
         encoding = self.tokenizer(
             path,
             max_length=128,
@@ -124,25 +90,33 @@ class MediaNameExtractor(nn.Module):
         path_ids = encoding["input_ids"].to(next(self.parameters()).device)
         path_mask = encoding["attention_mask"].to(next(self.parameters()).device)
 
+        # 2. 模型预测（0~1分数）
         outputs = self.forward(path_ids, path_mask)
         scores = outputs["token_scores"].squeeze().cpu().numpy()
         tokens = self.tokenizer.convert_ids_to_tokens(path_ids.squeeze().cpu().numpy())
 
-        # 新增：打印所有字符和对应分数（关键调试信息）
-        print("\n=== 字符分数详情 ===")
+        # 3. 打印调试信息（查看分数分布）
+        print("\n=== 字符分数详情（0~1）===")
         for token, score in zip(tokens, scores):
-            if token not in ["[PAD]", "[CLS]", "[SEP]"]:  # 过滤特殊符号
-                print(f"字符：{token} | 分数：{score:.4f}")
+            if token not in ["[PAD]", "[CLS]", "[SEP]"]:
+                print(f"字符：{token:<4} | 分数：{score:.4f}")
 
-        # 原有过滤逻辑
+        # 4. 筛选有效字符（降低阈值，精简过滤规则）
         name_chars = []
+        redundant_tokens = {"/", "\\", ".", "（", "）", "(", ")", " "}
         for token, score in zip(tokens, scores):
-            if score > 0.5 and token not in ["[PAD]", "[CLS]", "[SEP]"]:
-                if token not in ["/", "\\", ".", "（", "）", "(", ")", " ", "4K", "1080P", "HDR", "国语", "中字", "超清", "蓝光", "原盘", "系列", "部", "集"]:
-                    name_chars.append(token)
+            # 分数阈值调低到0.2，仅过滤绝对冗余符号
+            if score > 0.2 and token not in redundant_tokens and token.strip():
+                name_chars.append(token)
 
-        name = "".join(list(dict.fromkeys(name_chars))).strip()
+        # 5. 去重+拼接结果
+        # 去重但保留顺序：dict.fromkeys可以保留首次出现的顺序
+        name_chars_unique = list(dict.fromkeys(name_chars))
+        name = "".join(name_chars_unique).strip()
+
+        # 6. 结果校验
         if not name or name.isdigit():
-            print(f"\n最终结果：未识别到影视名称（有效字符：{name_chars}）")
+            print(f"\n最终结果：未识别到影视名称（有效字符：{name_chars_unique}）")
             return "未识别到影视名称"
+        print(f"\n最终结果：{name}")
         return name
