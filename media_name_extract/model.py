@@ -77,7 +77,7 @@ class MediaNameExtractor(nn.Module):
 
         return loss / batch_size
 
-    @torch.no_grad()
+    """ @torch.no_grad()
     def extract_name(self, path):
         """推理：从路径提取名称"""
         # 编码路径（删除use_fast=False）
@@ -108,5 +108,41 @@ class MediaNameExtractor(nn.Module):
         name = "".join(list(dict.fromkeys(name_chars))).strip()
         # 过滤纯数字/空字符串
         if not name or name.isdigit():
+            return "未识别到影视名称"
+        return name """
+
+    # 在 model.py 的 extract_name 函数中，添加打印逻辑（临时调试）
+    @torch.no_grad()
+    def extract_name(self, path):
+        encoding = self.tokenizer(
+            path,
+            max_length=128,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt"
+        )
+        path_ids = encoding["input_ids"].to(next(self.parameters()).device)
+        path_mask = encoding["attention_mask"].to(next(self.parameters()).device)
+
+        outputs = self.forward(path_ids, path_mask)
+        scores = outputs["token_scores"].squeeze().cpu().numpy()
+        tokens = self.tokenizer.convert_ids_to_tokens(path_ids.squeeze().cpu().numpy())
+
+        # 新增：打印所有字符和对应分数（关键调试信息）
+        print("\n=== 字符分数详情 ===")
+        for token, score in zip(tokens, scores):
+            if token not in ["[PAD]", "[CLS]", "[SEP]"]:  # 过滤特殊符号
+                print(f"字符：{token} | 分数：{score:.4f}")
+
+        # 原有过滤逻辑
+        name_chars = []
+        for token, score in zip(tokens, scores):
+            if score > 0.5 and token not in ["[PAD]", "[CLS]", "[SEP]"]:
+                if token not in ["/", "\\", ".", "（", "）", "(", ")", " ", "4K", "1080P", "HDR", "国语", "中字", "超清", "蓝光", "原盘", "系列", "部", "集"]:
+                    name_chars.append(token)
+
+        name = "".join(list(dict.fromkeys(name_chars))).strip()
+        if not name or name.isdigit():
+            print(f"\n最终结果：未识别到影视名称（有效字符：{name_chars}）")
             return "未识别到影视名称"
         return name
