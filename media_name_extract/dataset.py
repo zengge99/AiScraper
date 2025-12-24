@@ -10,14 +10,12 @@ class SimpleMediaDataset(Dataset):
         self.data = self._load_and_validate_data(data_file)
 
     def _load_and_validate_data(self, data_file):
-        """加载并校验数据，过滤无效样本"""
         valid_data = []
         with open(data_file, "r", encoding="utf-8", errors="ignore") as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                # 拆分路径和名称（至少包含一个#）
                 parts = line.split("#", 2)
                 if len(parts) < 2:
                     print(f"警告：第{line_num}行格式错误，缺少#分隔符，已跳过")
@@ -37,7 +35,6 @@ class SimpleMediaDataset(Dataset):
     def __getitem__(self, idx):
         path, name = self.data[idx]
         
-        # 编码路径
         path_encoding = self.tokenizer(
             path,
             max_length=self.max_path_len,
@@ -45,7 +42,6 @@ class SimpleMediaDataset(Dataset):
             truncation=True,
             return_tensors="pt"
         )
-        # 编码名称
         name_encoding = self.tokenizer(
             name,
             max_length=self.max_name_len,
@@ -54,7 +50,6 @@ class SimpleMediaDataset(Dataset):
             return_tensors="pt"
         )
 
-        # 挤压维度（去掉batch维度）
         return {
             "path_ids": path_encoding["input_ids"].squeeze(0),
             "path_mask": path_encoding["attention_mask"].squeeze(0),
