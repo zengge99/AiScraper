@@ -8,7 +8,7 @@ class MediaNameExtractor(nn.Module):
         super().__init__()
         self.bert = BertModel.from_pretrained(
             pretrained_model_name,
-            torch_dtype=torch.float32,
+            dtype=torch.float32,
             low_cpu_mem_usage=True
         )
         # 删除use_fast=False参数
