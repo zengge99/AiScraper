@@ -77,8 +77,8 @@ class MediaNameExtractor(nn.Module):
 
         return loss / batch_size
 
-    """ @torch.no_grad()
-    def extract_name(self, path):
+    @torch.no_grad()
+    def extract_name_1(self, path):
         """推理：从路径提取名称"""
         # 编码路径（删除use_fast=False）
         encoding = self.tokenizer(
@@ -109,7 +109,7 @@ class MediaNameExtractor(nn.Module):
         # 过滤纯数字/空字符串
         if not name or name.isdigit():
             return "未识别到影视名称"
-        return name """
+        return name
 
     # 在 model.py 的 extract_name 函数中，添加打印逻辑（临时调试）
     @torch.no_grad()
