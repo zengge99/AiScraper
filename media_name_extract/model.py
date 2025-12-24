@@ -11,7 +11,8 @@ class MediaNameExtractor(nn.Module):
             torch_dtype=torch.float32,
             low_cpu_mem_usage=True
         )
-        self.tokenizer = BertTokenizer.from_pretrained(pretrained_model_name, use_fast=False)
+        # 删除use_fast=False参数
+        self.tokenizer = BertTokenizer.from_pretrained(pretrained_model_name)
         # 名称提取头：生成候选名称的相似度分数
         self.fc = nn.Linear(self.bert.config.hidden_size, 1)
         self.dropout = nn.Dropout(0.1)
@@ -37,7 +38,6 @@ class MediaNameExtractor(nn.Module):
             max_similarity = torch.max(similarity, dim=-1)[0]  # [batch, path_len]：每个路径token与名称的最大相似度
             
             # 损失：让名称对应的token相似度趋近1，其余趋近0
-            # 先从路径中找到名称的起始/结束位置（用于生成监督信号）
             loss = self._compute_matching_loss(path_ids, name_ids, max_similarity)
             return {"loss": loss, "similarity": max_similarity}
         else:
@@ -80,14 +80,13 @@ class MediaNameExtractor(nn.Module):
     @torch.no_grad()
     def extract_name(self, path):
         """推理：从路径提取名称"""
-        # 编码路径
+        # 编码路径（删除use_fast=False）
         encoding = self.tokenizer(
             path,
             max_length=128,
             padding="max_length",
             truncation=True,
-            return_tensors="pt",
-            use_fast=False
+            return_tensors="pt"
         )
         path_ids = encoding["input_ids"].to(next(self.parameters()).device)
         path_mask = encoding["attention_mask"].to(next(self.parameters()).device)

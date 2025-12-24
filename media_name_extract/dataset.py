@@ -40,23 +40,21 @@ class SimpleMediaDataset(Dataset):
         path = item["path"]
         name = item["name"]
 
-        # 编码路径
+        # 编码路径（删除use_fast=False）
         path_encoding = self.tokenizer(
             path,
             max_length=self.max_path_len,
             padding="max_length",
             truncation=True,
-            return_tensors="pt",
-            use_fast=False
+            return_tensors="pt"
         )
-        # 编码名称
+        # 编码名称（删除use_fast=False）
         name_encoding = self.tokenizer(
             name,
             max_length=self.max_name_len,
             padding="max_length",
             truncation=True,
-            return_tensors="pt",
-            use_fast=False
+            return_tensors="pt"
         )
 
         return {

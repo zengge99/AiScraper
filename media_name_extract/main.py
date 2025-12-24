@@ -3,7 +3,8 @@ import torch
 import argparse
 import warnings
 from torch.utils.data import DataLoader
-from transformers import BertTokenizer, AdamW, get_linear_schedule_with_warmup
+from transformers import BertTokenizer, get_linear_schedule_with_warmup
+from torch.optim import AdamW  # 从PyTorch导入AdamW
 from model import MediaNameExtractor
 from dataset import SimpleMediaDataset
 
@@ -21,8 +22,8 @@ SAVE_PATH = "best_media_model.pt"
 
 def train(args):
     """训练模型（只需路径#名称格式数据）"""
-    # 1. 初始化分词器和数据集
-    tokenizer = BertTokenizer.from_pretrained("bert-base-chinese", use_fast=False)
+    # 1. 初始化分词器和数据集（删除use_fast=False）
+    tokenizer = BertTokenizer.from_pretrained("bert-base-chinese")
     train_dataset = SimpleMediaDataset(args.train_data, tokenizer, MAX_PATH_LEN, MAX_NAME_LEN)
     dev_dataset = SimpleMediaDataset(args.dev_data, tokenizer, MAX_PATH_LEN, MAX_NAME_LEN)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
