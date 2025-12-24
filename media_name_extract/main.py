@@ -3,8 +3,7 @@ import torch
 import argparse
 import warnings
 from torch.utils.data import DataLoader
-from transformers import BertTokenizer, get_linear_schedule_with_warmup
-from torch.optim import AdamW
+from transformers import BertTokenizer
 from model import MediaNameExtractor
 from dataset import SimpleMediaDataset
 
@@ -12,10 +11,10 @@ warnings.filterwarnings("ignore")
 
 # 全局配置
 DEVICE = torch.device("cpu")
-BATCH_SIZE = 4  # 进一步增大批次
+BATCH_SIZE = 4
 MAX_PATH_LEN = 128
 MAX_NAME_LEN = 32
-LR = 3e-5  # 调高学习率，加速参数更新
+LR = 5e-5  # 提高学习率，加速BERT微调
 SAVE_PATH = "best_media_model.pt"
 LOSS_RECORD_PATH = "best_loss.txt"
 
@@ -34,19 +33,19 @@ def save_best_loss(loss):
         f.write(f"{loss:.6f}")
 
 def train(args):
+    # 初始化分词器和模型
     tokenizer = BertTokenizer.from_pretrained("bert-base-chinese")
-    print(f"📖 读取数据：训练集={args.train_data} | 验证集={args.dev_data}")
+    model = MediaNameExtractor().to(DEVICE)
+    
+    # 加载数据
     train_dataset = SimpleMediaDataset(args.train_data, tokenizer, MAX_PATH_LEN, MAX_NAME_LEN)
     dev_dataset = SimpleMediaDataset(args.dev_data, tokenizer, MAX_PATH_LEN, MAX_NAME_LEN)
-    
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
     dev_loader = DataLoader(dev_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    # 初始化模型
-    model = MediaNameExtractor().to(DEVICE)
+    # 加载最优模型（如有）
     best_dev_loss = load_best_loss()
     model_loaded = False
-
     if os.path.exists(SAVE_PATH):
         try:
             model.load_state_dict(torch.load(SAVE_PATH, map_location=DEVICE))
@@ -64,27 +63,17 @@ def train(args):
             model_loaded = True
             print(f"✅ 加载最优模型，历史最优验证损失：{best_dev_loss:.4f}")
         except Exception as e:
-            print(f"⚠️  加载模型失败，从头训练：{str(e)}")
+            print(f"⚠️  加载模型失败，从头训练：{e}")
             best_dev_loss = float("inf")
 
-    # 优化器配置：提高权重衰减
-    optimizer = AdamW(
-        model.parameters(),
-        lr=LR,
-        eps=1e-8,
-        weight_decay=0.1  # 提高权重衰减，抑制过拟合
-    )
+    # 优化器和学习率调度器
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.1)
     total_steps = len(train_loader) * args.epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=int(total_steps*0.1),
-        num_training_steps=total_steps
-    )
+    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=total_steps)
 
-    # 训练循环：控制轮数为5-8轮
+    # 训练循环
     print(f"\n===== 开始训练 =====")
-    print(f"训练轮数：{args.epochs} | 批次大小：{BATCH_SIZE} | 已加载模型：{model_loaded}")
-    
+    print(f"训练轮数：{args.epochs} | 批次大小：{BATCH_SIZE} | 学习率：{LR}")
     for epoch in range(args.epochs):
         model.train()
         train_loss_total = 0.0
@@ -95,22 +84,24 @@ def train(args):
             name_ids = batch["name_ids"].to(DEVICE)
             name_mask = batch["name_mask"].to(DEVICE)
 
+            # 前向+反向传播
             outputs = model(path_ids, path_mask, name_ids, name_mask)
             loss = outputs["loss"]
-            
-            # 梯度裁剪，避免梯度爆炸
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             loss.backward()
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
 
             train_loss_total += loss.item()
 
+            # 打印批次损失
             if (batch_idx + 1) % 5 == 0:
                 print(f"[Epoch {epoch+1}/{args.epochs}] Batch {batch_idx+1} | 批次损失：{loss.item():.4f}")
 
-        # 验证
+        # 验证阶段
         model.eval()
         dev_loss_total = 0.0
         with torch.no_grad():
@@ -122,9 +113,11 @@ def train(args):
                 outputs = model(path_ids, path_mask, name_ids, name_mask)
                 dev_loss_total += outputs["loss"].item()
 
+        # 计算平均损失
         avg_train_loss = train_loss_total / len(train_loader)
         avg_dev_loss = dev_loss_total / len(dev_loader)
 
+        # 保存最优模型
         if avg_dev_loss < best_dev_loss:
             best_dev_loss = avg_dev_loss
             torch.save(model.state_dict(), SAVE_PATH)
@@ -135,35 +128,39 @@ def train(args):
 
         print(f"[Epoch {epoch+1}] 训练损失：{avg_train_loss:.4f} | 验证损失：{avg_dev_loss:.4f}\n")
 
-    print(f"===== 训练完成！最优模型：{SAVE_PATH} =====")
+    print(f"===== 训练完成！最优模型已保存至 {SAVE_PATH} =====")
 
 def infer(args):
+    # 加载模型
     if not os.path.exists(SAVE_PATH):
-        print(f"错误：未找到模型 {SAVE_PATH}，请先训练！")
+        print(f"错误：未找到模型文件 {SAVE_PATH}，请先训练！")
         return
 
     model = MediaNameExtractor().to(DEVICE)
     try:
         model.load_state_dict(torch.load(SAVE_PATH, map_location=DEVICE))
+        model.eval()
         print("✅ 模型加载成功")
     except Exception as e:
         print(f"❌ 模型加载失败：{e}")
         return
 
-    name = model.extract_name(args.path)
-    return name
+    # 提取名称
+    model.extract_name(args.path)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="影视名称提取模型（解决特征塌陷）")
+    parser = argparse.ArgumentParser(description="影视名称提取模型（解决分数集中0.5问题）")
     subparsers = parser.add_subparsers(dest="command", help="子命令：train / infer")
 
+    # 训练参数
     train_parser = subparsers.add_parser("train", help="训练模型")
     train_parser.add_argument("--train_data", type=str, default="train_data.txt", help="训练数据路径")
     train_parser.add_argument("--dev_data", type=str, default="dev_data.txt", help="验证数据路径")
-    train_parser.add_argument("--epochs", type=int, default=8, help="训练轮数（建议5-8轮）")
+    train_parser.add_argument("--epochs", type=int, default=20, help="训练轮数（建议20轮）")
 
+    # 推理参数
     infer_parser = subparsers.add_parser("infer", help="提取影视名称")
-    infer_parser.add_argument("--path", type=str, required=True, help="原始文件路径")
+    infer_parser.add_argument("--path", type=str, required=True, help="待提取的文件路径")
 
     args = parser.parse_args()
     if args.command == "train":
