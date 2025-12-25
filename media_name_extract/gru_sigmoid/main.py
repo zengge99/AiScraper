@@ -328,7 +328,19 @@ def run_predict(path):
     clean_result = raw_result.replace('.', ' ').replace('_', ' ')
     clean_result = re.sub(r'\s+', ' ', clean_result)
     clean_result = clean_result.strip("/()# “”.-")
-    clean_result = TextUtils.fix_name(path, clean_result) 
+
+    if clean_result:
+        # 1. 对清洗后的结果进行正则转义 (处理名字里可能有 + ? 等特殊符号的情况)
+        escaped_clean = re.escape(clean_result)
+        verify_pattern = escaped_clean.replace(r'\ ', r'[._\s\-\(\)\[\]]*')
+        if not re.search(verify_pattern, path, re.IGNORECASE):
+            if DEBUG_MODE:
+                print(f"⚠️ [验证失败] '{clean_result}' 无法在原路径中连续匹配，判定为无效提取。")
+            clean_result = ""
+
+    # 只有当 clean_result 有效时，才进行季数修复（防止为空时 fix_name 强行从路径抓取季数返回 "第1季"）
+    if clean_result:
+        clean_result = TextUtils.fix_name(path, clean_result) 
 
     if DEBUG_MODE: 
         print(f"📥 提取原文: {raw_result}")
