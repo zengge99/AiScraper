@@ -215,9 +215,11 @@ def run_predict(path):
     # C. 去掉首尾可能残留的非字母符号 (如 / ( ) - 等)
     clean_result = clean_result.strip("/()# “”.-")
 
-    print(f"\n🏷️  原始输入: {path}")
-    print(f"📥 提取原文: {raw_result}")
-    print(f"✅ 最终结果: {clean_result}\n")
+    if DEBUG_MODE: 
+        print(f"📥 提取原文: {raw_result}")
+        print(f"✅ 最终结果: {clean_result}\n")
+    else: 
+        print(final_res)
 
 # --- 入口控制 ---
 if __name__ == "__main__":
