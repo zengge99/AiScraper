@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-# 注意：移除了 random_split，因为我们将手动进行分层划分
 from tqdm import tqdm
 import pickle
 import sys
@@ -380,4 +379,3 @@ if __name__ == "__main__":
         run_predict(sys.argv[1])
     else:
         run_train()
-        
