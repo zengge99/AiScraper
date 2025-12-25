@@ -7,6 +7,8 @@ import pickle
 import sys
 import os
 import re
+import random
+import numpy as np  # 引入numpy用于固定种子
 
 # --- 全局核心配置 ---
 NUM_THREADS = 4
@@ -17,6 +19,7 @@ MAX_LEN = 150        # 最大路径长度
 MODEL_PATH = "movie_model.pth"
 VOCAB_PATH = "vocab.pkl"
 DATA_FILE = "train_data.txt"
+SEED = 42            # 🎲 固定随机种子
 
 # --- 预测/调试配置 ---
 DEBUG_MODE = True    # 开启后显示全路径所有字符得分
@@ -25,6 +28,17 @@ SMOOTH_VAL = 0.05    # 辅助判定阈值（用于救回中间字符）
 
 # 必须在 import torch 之后立即设置
 torch.set_num_threads(NUM_THREADS)
+
+# --- 🛠️ 辅助函数：固定随机种子 ---
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # 保证cudnn可复现性（会降低一点速度，但在cpu上无影响）
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # --- 模型结构定义 ---
 class FilmExtractor(nn.Module):
@@ -56,37 +70,28 @@ class MovieDataset(Dataset):
             input_path, target_name = line.rsplit('#', 1)
             target_name = target_name.strip()
             
-            # 构造正则：允许目标名中的空格对应路径中的 "." "_" 或 " "
-            # 例如目标 "Transformers The" -> 正则 "Transformers[._\s]+The"
             escaped_target = re.escape(target_name)
             pattern = escaped_target.replace(r'\ ', r'[._\s]+')
-            
-            # 在路径中搜索匹配项 (忽略大小写)
             match = re.search(pattern, input_path, re.IGNORECASE)
             
             if match:
                 start_idx = match.start()
                 end_idx = match.end()
                 
-                # 构建 Label
                 input_ids = [char_to_idx.get(c, 1) for c in input_path[:max_len]]
                 labels = [0.0] * len(input_ids)
                 
-                # 只有匹配到的部分标为 1.0
                 limit = min(end_idx, max_len)
                 for i in range(start_idx, limit):
                     labels[i] = 1.0
                 
-                # Padding
                 pad_len = max_len - len(input_ids)
                 self.samples.append((
                     torch.tensor(input_ids + [0] * pad_len), 
                     torch.tensor(labels + [0.0] * pad_len)
                 ))
             else:
-                # 如果完全匹配不到（比如数据标注错了），则跳过
                 skipped_count += 1
-            # --- 核心修改结束 ---
 
         if skipped_count > 0:
             print(f"⚠️ 跳过了 {skipped_count} 条无法匹配标签的数据。")
@@ -94,20 +99,33 @@ class MovieDataset(Dataset):
     def __len__(self): return len(self.samples)
     def __getitem__(self, idx): return self.samples[idx]
 
+# --- 🛠️ 辅助函数：验证集计算 ---
+def validate_one_epoch(model, loader, criterion):
+    model.eval()
+    v_loss = 0
+    with torch.no_grad():
+        for vx, vy in loader:
+            pred = model(vx)
+            loss = criterion(pred, vy)
+            v_loss += loss.item()
+    return v_loss / len(loader) if len(loader) > 0 else 0
+
 # --- 训练逻辑 ---
 def run_train():
+    # 设置全局种子，保证后续 DataLoader shuffle 等行为一致
+    set_seed(SEED)
+    print(f"🔒 随机种子已固定为: {SEED}")
+
     if not os.path.exists(DATA_FILE): 
         print(f"❌ 找不到数据文件 {DATA_FILE}"); return
         
     with open(DATA_FILE, 'r', encoding='utf-8') as f: 
         lines = f.readlines()
     
-    # 构建词表
     if os.path.exists(VOCAB_PATH):
         with open(VOCAB_PATH, 'rb') as f: char_to_idx = pickle.load(f)
         print("ℹ️ 已加载现有词表。")
     else:
-        # 只统计 '#' 左边的字符（即路径部分）
         raw_paths = [l.split('#')[0] for l in lines if '#' in l]
         all_chars = set("".join(raw_paths))
         char_to_idx = {c: i+2 for i, c in enumerate(sorted(list(all_chars)))}
@@ -121,23 +139,38 @@ def run_train():
 
     train_size = int(0.9 * len(dataset))
     val_size = len(dataset) - train_size
-    # 修复：防止数据集过小导致 val_size 为 0
     if val_size < 1: train_size -= 1; val_size += 1
-        
-    train_ds, val_ds = random_split(dataset, [train_size, val_size])
+    
+    # 使用固定种子的 Generator 进行数据集切分
+    # 这样每次运行脚本，分到 train 和 val 的数据是完全固定的
+    split_generator = torch.Generator().manual_seed(SEED)
+    train_ds, val_ds = random_split(dataset, [train_size, val_size], generator=split_generator)
+    
+    # DataLoader 的 shuffle=True 也会受到全局 torch.manual_seed 的影响
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
     model = FilmExtractor(len(char_to_idx))
+    criterion = nn.BCELoss()
+    optimizer = optim.AdamW(model.parameters(), lr=LR)
+    
+    # 初始化 best_val_loss 逻辑
+    best_val_loss = float('inf')
+
     if os.path.exists(MODEL_PATH):
         print(f"🔄 检测到现有模型，加载权重以 LR={LR} 继续微调...")
         model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu'))
-    
-    optimizer = optim.AdamW(model.parameters(), lr=LR)
-    criterion = nn.BCELoss()
-    best_val_loss = float('inf') 
+        
+        # 在开始训练循环前，先计算一次当前模型的验证集 Loss
+        print("📊 正在计算当前模型的初始验证集 Loss (基准线)...")
+        initial_val_loss = validate_one_epoch(model, val_loader, criterion)
+        best_val_loss = initial_val_loss # 将起点设为当前模型水平
+        print(f"✅ 当前模型基准 Loss: {best_val_loss:.4f}")
+    else:
+        print("🆕 未检测到模型，将从头开始训练。")
 
-    print(f"🚀 开始训练 | 样本数: {len(dataset)} (Skip失败样本)")
+    print(f"🚀 开始训练 | 样本数: {len(dataset)} | 训练集: {len(train_ds)} | 验证集: {len(val_ds)}")
+    
     try:
         for epoch in range(EPOCHS):
             model.train()
@@ -150,22 +183,20 @@ def run_train():
                 optimizer.step()
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
             
-            model.eval()
-            v_loss = 0
-            with torch.no_grad():
-                for vx, vy in val_loader:
-                    v_loss += criterion(model(vx), vy).item()
+            # 使用封装好的验证函数
+            avg_val_loss = validate_one_epoch(model, val_loader, criterion)
             
-            avg_val_loss = v_loss / len(val_loader)
+            # 只有当 Loss 确实比之前的（包括刚加载进来的）更低时，才保存
             if avg_val_loss < best_val_loss:
+                print(f" ✨ Loss 优化 ({best_val_loss:.4f} -> {avg_val_loss:.4f})，模型已更新。")
                 best_val_loss = avg_val_loss
                 torch.save(model.state_dict(), MODEL_PATH)
-                print(f" ✨ 验证集 Loss 提升至 {avg_val_loss:.4f}，模型已保存。")
             else:
-                print(f" ⏳ 验证集 Loss: {avg_val_loss:.4f} (未提升)")
+                print(f" ⏳ 验证集 Loss: {avg_val_loss:.4f} (未提升，最佳: {best_val_loss:.4f})")
+                
     except KeyboardInterrupt: print("\n🛑 用户手动停止训练。")
 
-# --- 预测逻辑 (核心修改：后处理) ---
+# --- 预测逻辑 ---
 def run_predict(path):
     if not os.path.exists(MODEL_PATH) or not os.path.exists(VOCAB_PATH):
         print("❌ 错误: 找不到模型或词表文件。请先运行训练。"); return
@@ -175,7 +206,6 @@ def run_predict(path):
     model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu'))
     model.eval()
 
-    # 预处理：截断和转换 ID
     input_ids = [char_to_idx.get(c, 1) for c in path[:MAX_LEN]]
     padded = input_ids + [0] * (MAX_LEN - len(input_ids))
     
@@ -184,14 +214,13 @@ def run_predict(path):
 
     if DEBUG_MODE:
         print(f"\n{'='*65}")
-        print(f"{'索引':<4} | {'字符':<4} | {'分值 (10位小数)':<15} | 状态")
+        print(f"{'索引':<4} | {'字符':<4} | {'分值':<15} | 状态")
         print("-" * 65)
         for i, p in enumerate(probs):
             status = "✅ [选中]" if p > THRESHOLD else "   [排除]"
             print(f"{i:<4} | {path[i]:<4} | {p:.10f} | {status}")
         print(f"{'='*65}\n")
 
-    # 增强型提取逻辑 (桥梁逻辑)
     res_list = []
     for i, p in enumerate(probs):
         is_high = p > THRESHOLD
@@ -206,15 +235,8 @@ def run_predict(path):
             res_list.append(path[i])
     
     raw_result = "".join(res_list)
-    
-    # 目的：将 Transformers.The.Last.Knight 转换为 Transformers The Last Knight
-    # A. 替换点和下划线为空格
     clean_result = raw_result.replace('.', ' ').replace('_', ' ')
-    
-    # B. 再次正则清洗：把连续的空格变成单个空格
     clean_result = re.sub(r'\s+', ' ', clean_result)
-    
-    # C. 去掉首尾可能残留的非字母符号 (如 / ( ) - 等)
     clean_result = clean_result.strip("/()# “”.-")
 
     if DEBUG_MODE: 
@@ -228,5 +250,5 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         run_predict(sys.argv[1])
     else:
-        # 不带参数：训练模式
         run_train()
+        
