@@ -235,7 +235,7 @@ def run_train():
         all_val_lines.extend(val_part)
         print(f"  └─ {os.path.basename(f_path)}: 训练 {len(train_part)} 条 / 验证 {len(val_part)} 条")
 
-    print(f"📊 总计: 训练集 {len(all_train_lines)} 条 | 验证集 {len(all_val_lines)} 条")
+    print(f"总计: 训练集 {len(all_train_lines)} 条 | 验证集 {len(all_val_lines)} 条")
 
     # 3. 构建或加载词表 (基于所有数据)
     all_lines_for_vocab = all_train_lines + all_val_lines
