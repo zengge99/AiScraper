@@ -219,7 +219,7 @@ def run_predict(path):
         print(f"📥 提取原文: {raw_result}")
         print(f"✅ 最终结果: {clean_result}\n")
     else: 
-        print(final_res)
+        print(clean_result)
 
 # --- 入口控制 ---
 if __name__ == "__main__":
