@@ -6,6 +6,7 @@ from tqdm import tqdm
 import pickle
 import sys
 import os
+import re
 
 # --- 全局核心配置 ---
 NUM_THREADS = 4
