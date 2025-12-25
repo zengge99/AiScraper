@@ -175,7 +175,7 @@ class MovieDataset(Dataset):
                 skipped_count += 1
 
         if skipped_count > 0:
-            print(f"⚠️ 跳过了 {skipped_count} 条无法匹配标签的数据。")
+            print(f"跳过了 {skipped_count} 条无法匹配标签的数据。")
 
     def __len__(self): return len(self.samples)
     def __getitem__(self, idx): return self.samples[idx]
@@ -195,7 +195,7 @@ def validate_one_epoch(model, loader, criterion):
 def run_train():
     # 设置全局种子
     set_seed(SEED)
-    print(f"🔒 随机种子已固定为: {SEED}")
+    print(f"随机种子已固定为: {SEED}")
 
     # 1. 搜索所有匹配的文件
     data_files = glob.glob(DATA_FILE_PATTERN)
@@ -205,7 +205,7 @@ def run_train():
     if not data_files:
         print(f"❌ 未找到匹配 {DATA_FILE_PATTERN} 的数据文件。"); return
     
-    print(f"📂 发现 {len(data_files)} 个数据文件: {data_files}")
+    print(f"发现 {len(data_files)} 个数据文件: {data_files}")
 
     all_train_lines = []
     all_val_lines = []
@@ -241,14 +241,14 @@ def run_train():
     all_lines_for_vocab = all_train_lines + all_val_lines
     if os.path.exists(VOCAB_PATH):
         with open(VOCAB_PATH, 'rb') as f: char_to_idx = pickle.load(f)
-        print("ℹ️ 已加载现有词表。")
+        print("已加载现有词表。")
     else:
         raw_paths = [l.split('#')[0] for l in all_lines_for_vocab]
         all_chars = set("".join(raw_paths))
         char_to_idx = {c: i+2 for i, c in enumerate(sorted(list(all_chars)))}
         char_to_idx['<PAD>'], char_to_idx['<UNK>'] = 0, 1
         with open(VOCAB_PATH, 'wb') as f: pickle.dump(char_to_idx, f)
-        print(f"🆕 已创建新词表，包含 {len(char_to_idx)} 个字符。")
+        print(f"已创建新词表，包含 {len(char_to_idx)} 个字符。")
 
     # 4. 创建 Dataset 和 DataLoader
     # 注意：这里直接传入切分好的 list，不需要再用 random_split
@@ -256,7 +256,7 @@ def run_train():
     val_ds = MovieDataset(all_val_lines, char_to_idx)
 
     if len(train_ds) < 1:
-        print("❌ 有效样本数量不足，无法进行训练。"); return
+        print("有效样本数量不足，无法进行训练。"); return
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
     # 验证集不需要 shuffle，batch_size 可以大一点或者保持一致
@@ -269,14 +269,14 @@ def run_train():
     best_val_loss = float('inf')
 
     if os.path.exists(MODEL_PATH):
-        print(f"🔄 检测到现有模型，加载权重以 LR={LR} 继续微调...")
+        print(f"检测到现有模型，加载权重以 LR={LR} 继续微调...")
         model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu'))
         
         if len(val_ds) > 0:
-            print("📊 正在计算当前模型的初始验证集 Loss (基准线)...")
+            print("正在计算当前模型的初始验证集 Loss (基准线)...")
             initial_val_loss = validate_one_epoch(model, val_loader, criterion)
             best_val_loss = initial_val_loss 
-            print(f"✅ 当前模型基准 Loss: {best_val_loss:.4f}")
+            print(f"当前模型基准 Loss: {best_val_loss:.4f}")
     else:
         print("🆕 未检测到模型，将从头开始训练。")
     
@@ -312,7 +312,7 @@ def run_train():
 # --- 预测逻辑 ---
 def run_predict(path):
     if not os.path.exists(MODEL_PATH) or not os.path.exists(VOCAB_PATH):
-        print("❌ 错误: 找不到模型或词表文件。请先运行训练。"); return
+        print("错误: 找不到模型或词表文件。请先运行训练。"); return
 
     with open(VOCAB_PATH, 'rb') as f: char_to_idx = pickle.load(f)
     model = FilmExtractor(len(char_to_idx))
@@ -359,7 +359,7 @@ def run_predict(path):
         verify_pattern = escaped_clean.replace(r'\ ', r'[._\s\-\(\)\[\]]*')
         if not re.search(verify_pattern, path, re.IGNORECASE):
             if DEBUG_MODE:
-                print(f"⚠️ [验证失败] '{clean_result}' 无法在原路径中连续匹配，判定为无效提取。")
+                print(f"[验证失败] '{clean_result}' 无法在原路径中连续匹配，判定为无效提取。")
             clean_result = ""
 
     # 2. 混合模式：调用 JS 移植逻辑进行季数修复
@@ -368,8 +368,8 @@ def run_predict(path):
         clean_result = TextUtils.fix_name(path, clean_result) 
 
     if DEBUG_MODE: 
-        print(f"📥 提取原文: {raw_result}")
-        print(f"✅ 最终结果: {clean_result}\n")
+        print(f"提取原文: {raw_result}")
+        print(f"最终结果: {clean_result}\n")
     else: 
         print(clean_result)
 
