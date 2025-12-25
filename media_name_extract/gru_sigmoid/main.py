@@ -1,14 +1,16 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
+# 注意：移除了 random_split，因为我们将手动进行分层划分
 from tqdm import tqdm
 import pickle
 import sys
 import os
 import re
 import random
-import numpy as np  # 引入numpy用于固定种子
+import numpy as np
+import glob  # 引入glob用于匹配多个文件
 
 # --- 全局核心配置 ---
 NUM_THREADS = 4
@@ -18,7 +20,8 @@ EPOCHS = 50          # 训练轮数
 MAX_LEN = 150        # 最大路径长度
 MODEL_PATH = "movie_model.pth"
 VOCAB_PATH = "vocab.pkl"
-DATA_FILE = "train_data.txt"
+# 数据文件匹配模式 (匹配 train_data.txt, train_data_2.txt 等)
+DATA_FILE_PATTERN = "train_data*.txt" 
 SEED = 42            # 🎲 固定随机种子
 
 # --- 预测/调试配置 ---
@@ -36,7 +39,7 @@ def set_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    # 保证cudnn可复现性（会降低一点速度，但在cpu上无影响）
+    # 保证cudnn可复现性
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -47,13 +50,11 @@ class TextUtils:
     @staticmethod
     def number2text(text):
         """
-        将数字字符串转换为中文数字 (移植自 JS)
-        例: "1" -> "一", "12" -> "十二", "23" -> "二十三"
+        将数字字符串转换为中文数字
         """
         if not text: return text
-        # 去除前导0 (例如 "01" -> "1")
         text = text.lstrip('0')
-        if not text: return "零" # 处理全0情况
+        if not text: return "零" 
 
         try:
             num = int(text)
@@ -72,44 +73,36 @@ class TextUtils:
     @staticmethod
     def fix_name(path, ai_result):
         """
-        1. 优先检查 ai_result 中是否已经包含了 S01, Season 1 等字样，如果有，直接在结果内替换为中文格式。
-        2. 如果 ai_result 中没有季数信息，再回退到去 path 中查找并追加。
+        AI 结果后处理：修正或补全季数信息
         """
-        
-        # 定义需要再 ai_result 内部查找并替换的正则
-        # 包含了对 "第1季" (阿拉伯数字) 的修正，以及 S01, Season 1 等变体
-        # 使用 (?<!...) 和 (?!...) 负向断言防止匹配到普通单词中的字符
         replace_patterns = [
-            r'Season\s*(\d{1,2})',              # Season 1
-            r'SE(\d{1,2})',                     # SE01
-            r'(?<![a-zA-Z])S(\d{1,2})(?![a-zA-Z])', # S01 (前后非字母)
-            r'第(\d{1,2})季'                    # 第1季 -> 第一季
+            r'Season\s*(\d{1,2})',              
+            r'SE(\d{1,2})',                     
+            r'(?<![a-zA-Z])S(\d{1,2})(?![a-zA-Z])', 
+            r'第(\d{1,2})季'                    
         ]
 
         processed_result = ai_result
-        replaced_flag = False # 标记是否进行了内部替换
+        replaced_flag = False 
 
         def replace_func(match):
             nonlocal replaced_flag
             replaced_flag = True
             num = match.group(1)
             cn_num = TextUtils.number2text(num)
-            return f" 第{cn_num}季 " # 前后加空格防止粘连
+            return f" 第{cn_num}季 " 
 
         # 1. 尝试在 AI 结果内部直接替换
         for pattern in replace_patterns:
-            # 如果匹配到，re.sub 会调用 replace_func 进行替换
             if re.search(pattern, processed_result, re.IGNORECASE):
                 processed_result = re.sub(pattern, replace_func, processed_result, flags=re.IGNORECASE)
         
-        # 清理可能产生的多余空格
         processed_result = re.sub(r'\s+', ' ', processed_result).strip()
 
-        # [TODO 实现]: 如果 ai_result 中存在 patterns，则从 ai_result 匹配替换，不必从 path 匹配追加
         if replaced_flag:
             return processed_result
 
-        # 2. (兜底逻辑) 如果结果里没找到季数，再去原路径 path 里找，找到了追加到后面
+        # 2. (兜底) 从原路径找季数追加
         path_search_patterns = [
             r'Season\s*(\d{1,2})',
             r'SE(\d{1,2})',
@@ -123,10 +116,9 @@ class TextUtils:
                 num = match.group(1)
                 cn_num = TextUtils.number2text(num)
                 suffix = f"第{cn_num}季"
-                # 防止重复 (虽然上面已经判定过 replaced_flag=False，但双重保险)
                 if suffix not in processed_result:
                     return f"{processed_result} {suffix}"
-                break # 找到一个就停止
+                break 
         
         return processed_result
 
@@ -202,64 +194,92 @@ def validate_one_epoch(model, loader, criterion):
 
 # --- 训练逻辑 ---
 def run_train():
-    # 设置全局种子，保证后续 DataLoader shuffle 等行为一致
+    # 设置全局种子
     set_seed(SEED)
     print(f"🔒 随机种子已固定为: {SEED}")
 
-    if not os.path.exists(DATA_FILE): 
-        print(f"❌ 找不到数据文件 {DATA_FILE}"); return
-        
-    with open(DATA_FILE, 'r', encoding='utf-8') as f: 
-        lines = f.readlines()
+    # 1. 搜索所有匹配的文件
+    data_files = glob.glob(DATA_FILE_PATTERN)
+    # 排序以保证每次运行读取顺序一致
+    data_files.sort()
     
+    if not data_files:
+        print(f"❌ 未找到匹配 {DATA_FILE_PATTERN} 的数据文件。"); return
+    
+    print(f"📂 发现 {len(data_files)} 个数据文件: {data_files}")
+
+    all_train_lines = []
+    all_val_lines = []
+    
+    # 2. 遍历每个文件，分别进行 90% / 10% 切分
+    # 使用独立的 Random 实例进行 shuffle，不影响全局状态
+    rng = random.Random(SEED)
+    
+    for f_path in data_files:
+        with open(f_path, 'r', encoding='utf-8') as f:
+            lines = [l.strip() for l in f.readlines() if '#' in l.strip()]
+        
+        # 确定性打乱
+        rng.shuffle(lines)
+        
+        total = len(lines)
+        if total == 0: continue
+            
+        train_count = int(total * 0.9)
+        # 确保至少有数据，如果数据量太少(例如1条)，全归训练集
+        if train_count == 0 and total > 0: train_count = total
+        
+        train_part = lines[:train_count]
+        val_part = lines[train_count:]
+        
+        all_train_lines.extend(train_part)
+        all_val_lines.extend(val_part)
+        print(f"  └─ {os.path.basename(f_path)}: 训练 {len(train_part)} 条 / 验证 {len(val_part)} 条")
+
+    print(f"📊 总计: 训练集 {len(all_train_lines)} 条 | 验证集 {len(all_val_lines)} 条")
+
+    # 3. 构建或加载词表 (基于所有数据)
+    all_lines_for_vocab = all_train_lines + all_val_lines
     if os.path.exists(VOCAB_PATH):
         with open(VOCAB_PATH, 'rb') as f: char_to_idx = pickle.load(f)
         print("ℹ️ 已加载现有词表。")
     else:
-        raw_paths = [l.split('#')[0] for l in lines if '#' in l]
+        raw_paths = [l.split('#')[0] for l in all_lines_for_vocab]
         all_chars = set("".join(raw_paths))
         char_to_idx = {c: i+2 for i, c in enumerate(sorted(list(all_chars)))}
         char_to_idx['<PAD>'], char_to_idx['<UNK>'] = 0, 1
         with open(VOCAB_PATH, 'wb') as f: pickle.dump(char_to_idx, f)
         print(f"🆕 已创建新词表，包含 {len(char_to_idx)} 个字符。")
 
-    dataset = MovieDataset(lines, char_to_idx)
-    if len(dataset) < 2:
+    # 4. 创建 Dataset 和 DataLoader
+    # 注意：这里直接传入切分好的 list，不需要再用 random_split
+    train_ds = MovieDataset(all_train_lines, char_to_idx)
+    val_ds = MovieDataset(all_val_lines, char_to_idx)
+
+    if len(train_ds) < 1:
         print("❌ 有效样本数量不足，无法进行训练。"); return
 
-    train_size = int(0.9 * len(dataset))
-    val_size = len(dataset) - train_size
-    if val_size < 1: train_size -= 1; val_size += 1
-    
-    # 使用固定种子的 Generator 进行数据集切分
-    # 这样每次运行脚本，分到 train 和 val 的数据是完全固定的
-    split_generator = torch.Generator().manual_seed(SEED)
-    train_ds, val_ds = random_split(dataset, [train_size, val_size], generator=split_generator)
-    
-    # DataLoader 的 shuffle=True 也会受到全局 torch.manual_seed 的影响
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
+    # 验证集不需要 shuffle，batch_size 可以大一点或者保持一致
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
 
     model = FilmExtractor(len(char_to_idx))
     criterion = nn.BCELoss()
     optimizer = optim.AdamW(model.parameters(), lr=LR)
     
-    # 初始化 best_val_loss 逻辑
     best_val_loss = float('inf')
 
     if os.path.exists(MODEL_PATH):
         print(f"🔄 检测到现有模型，加载权重以 LR={LR} 继续微调...")
         model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu'))
         
-        # 在开始训练循环前，先计算一次当前模型的验证集 Loss
-        print("📊 正在计算当前模型的初始验证集 Loss (基准线)...")
-        initial_val_loss = validate_one_epoch(model, val_loader, criterion)
-        best_val_loss = initial_val_loss # 将起点设为当前模型水平
-        print(f"✅ 当前模型基准 Loss: {best_val_loss:.4f}")
+        if len(val_ds) > 0:
+            print("📊 正在计算当前模型的初始验证集 Loss (基准线)...")
+            initial_val_loss = validate_one_epoch(model, val_loader, criterion)
+            best_val_loss = initial_val_loss 
+            print(f"✅ 当前模型基准 Loss: {best_val_loss:.4f}")
     else:
         print("🆕 未检测到模型，将从头开始训练。")
-
-    print(f"🚀 开始训练 | 样本数: {len(dataset)} | 训练集: {len(train_ds)} | 验证集: {len(val_ds)}")
     
     try:
         for epoch in range(EPOCHS):
@@ -273,16 +293,20 @@ def run_train():
                 optimizer.step()
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
             
-            # 使用封装好的验证函数
-            avg_val_loss = validate_one_epoch(model, val_loader, criterion)
-            
-            # 只有当 Loss 确实比之前的（包括刚加载进来的）更低时，才保存
-            if avg_val_loss < best_val_loss:
-                print(f" ✨ Loss 优化 ({best_val_loss:.4f} -> {avg_val_loss:.4f})，模型已更新。")
-                best_val_loss = avg_val_loss
-                torch.save(model.state_dict(), MODEL_PATH)
+            # 只有当有验证集数据时才验证
+            if len(val_ds) > 0:
+                avg_val_loss = validate_one_epoch(model, val_loader, criterion)
+                
+                if avg_val_loss < best_val_loss:
+                    print(f" ✨ Loss 优化 ({best_val_loss:.4f} -> {avg_val_loss:.4f})，模型已更新。")
+                    best_val_loss = avg_val_loss
+                    torch.save(model.state_dict(), MODEL_PATH)
+                else:
+                    print(f" ⏳ 验证集 Loss: {avg_val_loss:.4f} (未提升，最佳: {best_val_loss:.4f})")
             else:
-                print(f" ⏳ 验证集 Loss: {avg_val_loss:.4f} (未提升，最佳: {best_val_loss:.4f})")
+                # 如果没有验证集（比如数据极少），则每一轮都保存
+                torch.save(model.state_dict(), MODEL_PATH)
+                print(" ⚠️ 无验证集，模型已保存。")
                 
     except KeyboardInterrupt: print("\n🛑 用户手动停止训练。")
 
@@ -329,16 +353,18 @@ def run_predict(path):
     clean_result = re.sub(r'\s+', ' ', clean_result)
     clean_result = clean_result.strip("/()# “”.-")
 
+    # 1. 验证连续性：对清洗后的结果进行正则转义 (处理名字里可能有 + ? 等特殊符号的情况)
     if clean_result:
-        # 1. 对清洗后的结果进行正则转义 (处理名字里可能有 + ? 等特殊符号的情况)
         escaped_clean = re.escape(clean_result)
+        # 允许原始路径中存在分隔符或括号，但核心字符顺序必须匹配
         verify_pattern = escaped_clean.replace(r'\ ', r'[._\s\-\(\)\[\]]*')
         if not re.search(verify_pattern, path, re.IGNORECASE):
             if DEBUG_MODE:
                 print(f"⚠️ [验证失败] '{clean_result}' 无法在原路径中连续匹配，判定为无效提取。")
             clean_result = ""
 
-    # 只有当 clean_result 有效时，才进行季数修复（防止为空时 fix_name 强行从路径抓取季数返回 "第1季"）
+    # 2. 混合模式：调用 JS 移植逻辑进行季数修复
+    # 只有当 clean_result 有效时才进行，避免空字符串去匹配出 "第1季"
     if clean_result:
         clean_result = TextUtils.fix_name(path, clean_result) 
 
@@ -354,3 +380,4 @@ if __name__ == "__main__":
         run_predict(sys.argv[1])
     else:
         run_train()
+        
