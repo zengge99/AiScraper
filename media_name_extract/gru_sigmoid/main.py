@@ -48,6 +48,8 @@ class FilmExtractor(nn.Module):
 class MovieDataset(Dataset):
     def __init__(self, lines, char_to_idx, max_len=MAX_LEN):
         self.samples = []
+        skipped_count = 0
+        
         for line in lines:
             line = line.strip()
             if '#' not in line: continue
