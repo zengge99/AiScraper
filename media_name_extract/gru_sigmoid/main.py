@@ -72,35 +72,63 @@ class TextUtils:
     @staticmethod
     def fix_name(path, ai_result):
         """
-        根据路径提取季数信息，并追加到 AI 识别结果之后
+        1. 优先检查 ai_result 中是否已经包含了 S01, Season 1 等字样，如果有，直接在结果内替换为中文格式。
+        2. 如果 ai_result 中没有季数信息，再回退到去 path 中查找并追加。
         """
-        # 定义需要匹配的正则模式，按优先级排序
-        # re.IGNORECASE 将在搜索时应用，所以这里不需要写 [sS]
-        patterns = [
-            r'Season\s*(\d{1,2})',  # 匹配 "Season 1", "Season01"
-            r'SE(\d{1,2})',         # 匹配 "SE01"
-            r'第(\d{1,2})季',        # 匹配 "第1季" (提取数字)
-            r'(?<![A-Za-z])S(\d{1,2})' # 匹配 "S01", 前面加否定断言防止匹配到单词里的S
+        
+        # 定义需要再 ai_result 内部查找并替换的正则
+        # 包含了对 "第1季" (阿拉伯数字) 的修正，以及 S01, Season 1 等变体
+        # 使用 (?<!...) 和 (?!...) 负向断言防止匹配到普通单词中的字符
+        replace_patterns = [
+            r'Season\s*(\d{1,2})',              # Season 1
+            r'SE(\d{1,2})',                     # SE01
+            r'(?<![a-zA-Z])S(\d{1,2})(?![a-zA-Z])', # S01 (前后非字母)
+            r'第(\d{1,2})季'                    # 第1季 -> 第一季
         ]
 
-        found_num = None
+        processed_result = ai_result
+        replaced_flag = False # 标记是否进行了内部替换
 
-        for pattern in patterns:
+        def replace_func(match):
+            nonlocal replaced_flag
+            replaced_flag = True
+            num = match.group(1)
+            cn_num = TextUtils.number2text(num)
+            return f" 第{cn_num}季 " # 前后加空格防止粘连
+
+        # 1. 尝试在 AI 结果内部直接替换
+        for pattern in replace_patterns:
+            # 如果匹配到，re.sub 会调用 replace_func 进行替换
+            if re.search(pattern, processed_result, re.IGNORECASE):
+                processed_result = re.sub(pattern, replace_func, processed_result, flags=re.IGNORECASE)
+        
+        # 清理可能产生的多余空格
+        processed_result = re.sub(r'\s+', ' ', processed_result).strip()
+
+        # [TODO 实现]: 如果 ai_result 中存在 patterns，则从 ai_result 匹配替换，不必从 path 匹配追加
+        if replaced_flag:
+            return processed_result
+
+        # 2. (兜底逻辑) 如果结果里没找到季数，再去原路径 path 里找，找到了追加到后面
+        path_search_patterns = [
+            r'Season\s*(\d{1,2})',
+            r'SE(\d{1,2})',
+            r'第(\d{1,2})季',
+            r'(?<![A-Za-z])S(\d{1,2})'
+        ]
+
+        for pattern in path_search_patterns:
             match = re.search(pattern, path, re.IGNORECASE)
             if match:
-                found_num = match.group(1)
-                break # 找到第一个匹配项就停止
-
-        if found_num:
-            cn_num = TextUtils.number2text(found_num)
-            suffix = f"第{cn_num}季"
-            
-            # 简单去重：如果 AI 已经提取出的名字里包含了完全一样的“第X季”，则不再追加
-            # 比如 AI 提取了 "权力的游戏第一季"，我们就不再加成 "权力的游戏第一季 第一季"
-            if suffix not in ai_result:
-                return f"{ai_result} {suffix}"
+                num = match.group(1)
+                cn_num = TextUtils.number2text(num)
+                suffix = f"第{cn_num}季"
+                # 防止重复 (虽然上面已经判定过 replaced_flag=False，但双重保险)
+                if suffix not in processed_result:
+                    return f"{processed_result} {suffix}"
+                break # 找到一个就停止
         
-        return ai_result
+        return processed_result
 
 # --- 模型结构定义 ---
 class FilmExtractor(nn.Module):
