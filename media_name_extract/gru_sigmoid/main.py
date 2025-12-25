@@ -40,6 +40,68 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+# --- 移植的 JS 逻辑工具类 ---
+class TextUtils:
+    CN_NUMS = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+
+    @staticmethod
+    def number2text(text):
+        """
+        将数字字符串转换为中文数字 (移植自 JS)
+        例: "1" -> "一", "12" -> "十二", "23" -> "二十三"
+        """
+        if not text: return text
+        # 去除前导0 (例如 "01" -> "1")
+        text = text.lstrip('0')
+        if not text: return "零" # 处理全0情况
+
+        try:
+            num = int(text)
+        except ValueError:
+            return text
+
+        if num <= 10:
+            return TextUtils.CN_NUMS[num]
+        elif num < 20:
+            return "十" + TextUtils.CN_NUMS[num % 10]
+        elif num % 10 == 0:
+            return TextUtils.CN_NUMS[num // 10] + "十"
+        else:
+            return TextUtils.CN_NUMS[num // 10] + "十" + TextUtils.CN_NUMS[num % 10]
+
+    @staticmethod
+    def fix_name(path, ai_result):
+        """
+        根据路径提取季数信息，并追加到 AI 识别结果之后
+        """
+        # 定义需要匹配的正则模式，按优先级排序
+        # re.IGNORECASE 将在搜索时应用，所以这里不需要写 [sS]
+        patterns = [
+            r'Season\s*(\d{1,2})',  # 匹配 "Season 1", "Season01"
+            r'SE(\d{1,2})',         # 匹配 "SE01"
+            r'第(\d{1,2})季',        # 匹配 "第1季" (提取数字)
+            r'(?<![A-Za-z])S(\d{1,2})' # 匹配 "S01", 前面加否定断言防止匹配到单词里的S
+        ]
+
+        found_num = None
+
+        for pattern in patterns:
+            match = re.search(pattern, path, re.IGNORECASE)
+            if match:
+                found_num = match.group(1)
+                break # 找到第一个匹配项就停止
+
+        if found_num:
+            cn_num = TextUtils.number2text(found_num)
+            suffix = f"第{cn_num}季"
+            
+            # 简单去重：如果 AI 已经提取出的名字里包含了完全一样的“第X季”，则不再追加
+            # 比如 AI 提取了 "权力的游戏第一季"，我们就不再加成 "权力的游戏第一季 第一季"
+            if suffix not in ai_result:
+                return f"{ai_result} {suffix}"
+        
+        return ai_result
+
 # --- 模型结构定义 ---
 class FilmExtractor(nn.Module):
     def __init__(self, vocab_size, embed_dim=64, hidden_dim=128):
@@ -238,6 +300,7 @@ def run_predict(path):
     clean_result = raw_result.replace('.', ' ').replace('_', ' ')
     clean_result = re.sub(r'\s+', ' ', clean_result)
     clean_result = clean_result.strip("/()# “”.-")
+    clean_result = TextUtils.fix_name(path, clean_result) 
 
     if DEBUG_MODE: 
         print(f"📥 提取原文: {raw_result}")
@@ -251,4 +314,3 @@ if __name__ == "__main__":
         run_predict(sys.argv[1])
     else:
         run_train()
-        
